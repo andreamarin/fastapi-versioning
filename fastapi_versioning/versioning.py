@@ -8,9 +8,10 @@ from starlette.routing import BaseRoute
 CallableT = TypeVar("CallableT", bound=Callable[..., Any])
 
 
-def version(major: int, minor: int = 0) -> Callable[[CallableT], CallableT]:
+def version(major: int, minor: int = 0, propagate = True) -> Callable[[CallableT], CallableT]:
     def decorator(func: CallableT) -> CallableT:
         func._api_version = (major, minor)  # type: ignore
+        func._propagate = propagate
         return func
 
     return decorator
@@ -22,7 +23,8 @@ def version_to_route(
 ) -> Tuple[Tuple[int, int], APIRoute]:
     api_route = cast(APIRoute, route)
     version = getattr(api_route.endpoint, "_api_version", default_version)
-    return version, api_route
+    propagate = getattr(api_route.endpoint, "_propagate", default_version)
+    return version, api_route, propagate
 
 
 def VersionedFastAPI(
@@ -30,6 +32,7 @@ def VersionedFastAPI(
     version_format: str = "{major}.{minor}",
     prefix_format: str = "/v{major}_{minor}",
     default_version: Tuple[int, int] = (1, 0),
+    propagate_routes: bool = True,
     **kwargs: Any,
 ) -> FastAPI:
     parent_app = FastAPI(
@@ -43,8 +46,8 @@ def VersionedFastAPI(
         version_to_route(route, default_version) for route in app.routes
     ]
 
-    for version, route in version_routes:
-        version_route_mapping[version].append(route)
+    for version, route, propagate in version_routes:
+        version_route_mapping[version].append((route, propagate))
 
     unique_routes = {}
     for version in sorted(version_route_mapping.keys()):
@@ -57,10 +60,16 @@ def VersionedFastAPI(
             version=semver,
             root_path=prefix,
         )
-        for route in version_route_mapping[version]:
+
+        remove_after = []
+        for route, propagate in version_route_mapping[version]:
             for method in route.methods:
                 unique_routes[route.path + "|" + method] = route
-        for route in unique_routes.values():
+
+                if not propagate or not propagate_routes:
+                    remove_after.append(route.path + "|" + method)
+
+        for key, route in unique_routes.items():
             versioned_app.router.routes.append(route)
         parent_app.mount(prefix, versioned_app)
 
@@ -69,5 +78,8 @@ def VersionedFastAPI(
         )
         def noop() -> None:
             ...
+
+        for key in remove_after:
+            _ = unique_routes.pop(key)
 
     return parent_app
